@@ -317,6 +317,7 @@ body {
         <div class="stat-item"><div class="stat-num" id="limitStatPlayed">0</div><div class="stat-label">Played</div></div>
         <div class="stat-item"><div class="stat-num" id="limitStatAvg">0.0</div><div class="stat-label">Avg / 5</div></div>
         <div class="stat-item"><div class="stat-num gold" id="limitStatXP">—</div><div class="stat-label">Total XP</div></div>
+        <div class="stat-item"><div class="stat-num" id="limitStatStreak">0</div><div class="stat-label">🔥 Streak</div></div>
         <div class="stat-item"><div class="stat-num" id="limitStatBest">0</div><div class="stat-label">Best</div></div>
       </div>
     </div>
@@ -509,6 +510,7 @@ function renderStats(stats,totalXP,roundXP,target){
     document.getElementById('limitStatPlayed').textContent=stats.played;
     document.getElementById('limitStatAvg').textContent=avg;
     document.getElementById('limitStatXP').textContent=totalXP!==null?totalXP:'—';
+    document.getElementById('limitStatStreak').textContent=streak;
     document.getElementById('limitStatBest').textContent=stats.maxStreak||0;
     return;
   }
@@ -553,6 +555,9 @@ async function handleSignedIn(user){
           const newRank=getRank(newXP);
           await db.from('profiles').update({xp:newXP,rank_title:newRank.title}).eq('id',user.id);
           currentProfile.xp=newXP;currentProfile.rank_title=newRank.title;
+          // Re-render limit screen stats immediately with updated XP
+          const stats=loadLocalStats();
+          renderStats(stats,newXP,0,'limit');
         }
       }
     }
