@@ -449,12 +449,14 @@ let scoreEmoji=[],currentStreak=0,roundXP=0;
 let currentUser=null,currentProfile=null,authMode='signup';
 let quizStarted=false;
 
-const todayStr=()=>new Date().toISOString().slice(0,10);
+const todayStr=()=>{const d=new Date();return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;};
 const hasPlayed=()=>localStorage.getItem('vq_done_'+todayStr())==='1';
 const markPlayed=()=>localStorage.setItem('vq_done_'+todayStr(),'1');
 const show=id=>document.getElementById(id).classList.add('active');
 const hide=id=>document.getElementById(id).classList.remove('active');
-function shuffle(arr){return [...arr].sort(()=>Math.random()-.5);}
+function resetGameState(){
+  qIdx=0;score=0;answered=false;scoreEmoji=[];roundXP=0;timerLeft=TIMER_SECONDS;
+}
 
 function setHeaderDate(){
   const d=new Date();
@@ -535,7 +537,10 @@ async function handleSignedIn(user){
   currentUser=user;
   const {data:profile}=await db.from('profiles').select('username,xp,rank_title').eq('id',user.id).maybeSingle();
   if(profile){
-    currentProfile=profile;guestName=profile.username;updateAuthUI();
+    currentProfile=profile;
+    await updateLeaderboardName(user.id, profile.username);
+    guestName=profile.username;
+    updateAuthUI();
   } else {
     showUsernamePicker(user);
   }
@@ -559,13 +564,15 @@ async function submitUsernamePicker(){
   if(!/^[a-zA-Z0-9_]+$/.test(username)){errEl.textContent='Letters, numbers and underscores only.';return;}
   btn.disabled=true;btn.textContent='SAVING...';
   try {
+    const user=window._pendingUser;
+    if(!user){errEl.textContent='Session expired. Please sign in again.';return;}
     const {data:ex}=await db.from('profiles').select('id').eq('username',username).maybeSingle();
     if(ex){errEl.textContent='That username is taken — try another.';return;}
-    const user=window._pendingUser;
     const rank=getRank(0);
     await db.from('profiles').insert({id:user.id,username,xp:0,rank_title:rank.title});
     currentUser=user;
     currentProfile={username,xp:0,rank_title:rank.title};
+    await updateLeaderboardName(user.id, username);
     guestName=username;
     window._pendingUser=null;
     document.getElementById('usernamePickerBg').classList.remove('open');
@@ -575,6 +582,16 @@ async function submitUsernamePicker(){
   } finally {
     btn.disabled=false;btn.textContent="LET'S GO →";
   }
+}
+
+async function updateLeaderboardName(userId, username){
+  // If they played today as a guest, update that entry with their real name and user_id
+  try {
+    await db.from('leaderboard')
+      .update({guest_name: username, user_id: userId})
+      .eq('play_date', todayStr())
+      .eq('guest_name', guestName);
+  } catch(e){ console.error('Leaderboard name update failed:', e); }
 }
 
 function updateAuthUI(){
@@ -675,7 +692,7 @@ async function init(){
     showScreen('screenLimit');return;
   }
   await loadQuestions();
-  if(questions&&questions.length>=5){buildGrid();loadQ(0);quizStarted=true;}
+  if(questions&&questions.length>=5){resetGameState();buildGrid();loadQ(0);quizStarted=true;}
 }
 
 async function loadQuestions(){
@@ -697,7 +714,7 @@ function startFromHTP(){
     renderStats(stats,currentProfile?currentProfile.xp:null,0,'limit');
     showScreen('screenLimit');return;
   }
-  if(!quizStarted&&questions&&questions.length>=5){buildGrid();loadQ(0);quizStarted=true;}
+  if(!quizStarted&&questions&&questions.length>=5){resetGameState();buildGrid();loadQ(0);quizStarted=true;}
 }
 
 async function buildDailySet(){
@@ -829,7 +846,15 @@ async function renderBoard(filter){
     } else if(filter==='monthly'){
       const now=new Date();
       const monthStart=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`;
-      ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').gte('play_date',monthStart).order('xp_earned',{ascending:false}).limit(50));
+      // Get all monthly entries then deduplicate by guest_name keeping highest XP
+      ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').gte('play_date',monthStart).order('xp_earned',{ascending:false}).limit(500));
+      if(data){
+        const seen=new Map();
+        data.forEach(e=>{
+          if(!seen.has(e.guest_name)||e.xp_earned>seen.get(e.guest_name).xp_earned) seen.set(e.guest_name,e);
+        });
+        data=[...seen.values()].sort((a,b)=>b.xp_earned-a.xp_earned).slice(0,50);
+      }
     } else {
       ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').order('xp_earned',{ascending:false}).limit(50));
     }
