@@ -545,6 +545,12 @@ async function handleSignedIn(user){
   if(profile){
     currentProfile=profile;
     await updateLeaderboardName(user.id, profile.username);
+    // Remove duplicate entries — keep only the highest XP entry for today
+    const {data:todayEntries}=await db.from('leaderboard').select('id,xp_earned').eq('user_id',user.id).eq('play_date',todayStr()).order('xp_earned',{ascending:false});
+    if(todayEntries&&todayEntries.length>1){
+      const idsToDelete=todayEntries.slice(1).map(r=>r.id);
+      await db.from('leaderboard').delete().in('id',idsToDelete);
+    }
     // If profile XP is 0 but they played today as guest, transfer that XP
     if((profile.xp||0)===0){
       const lastLbId=localStorage.getItem('vq_last_lb_id');
@@ -707,6 +713,18 @@ async function init(){
   setHeaderDate();loadStreak();
   await initAuth();
   if(!currentProfile)setGuestName();
+
+  // Server-side check for signed-in users — localStorage can be cleared
+  if(currentUser){
+    const {data:todayEntry}=await db.from('leaderboard').select('id').eq('user_id',currentUser.id).eq('play_date',todayStr()).maybeSingle();
+    if(todayEntry){
+      markPlayed(); // sync localStorage
+      const stats=loadLocalStats();
+      renderStats(stats,currentProfile?currentProfile.xp:null,0,'limit');
+      showScreen('screenLimit');return;
+    }
+  }
+
   if(!localStorage.getItem('vq_seen_htp')){
     localStorage.setItem('vq_seen_htp','1');
     openHTP();
