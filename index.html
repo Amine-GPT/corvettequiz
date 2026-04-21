@@ -831,9 +831,9 @@ async function initAuth(){
   });
 }
 async function handleSignedIn(user){
+  // Don't re-process if same user already loaded
+  if(currentProfile && currentUser && currentUser.id === user.id) return;
   currentUser=user;
-  // Small delay to allow profile insert to complete if coming from username picker
-  await new Promise(r=>setTimeout(r,500));
   const {data:profile}=await db.from('profiles').select('username,xp,rank_title').eq('id',user.id).maybeSingle();
   if(profile){
     currentProfile=profile; guestName=profile.username;
@@ -884,8 +884,9 @@ async function submitUsernamePicker(){
     const rank  = getRank(0);
     await db.from('profiles').insert({id:user.id, username, xp:0, rank_title:rank.title});
 
-    currentProfile = {username, xp:0, rank_title:rank.title};
-    guestName      = username;
+    currentUser       = user;
+    currentProfile    = {username, xp:0, rank_title:rank.title};
+    guestName         = username;
     window._pendingUser = null;
 
     document.getElementById('usernamePickerBg').classList.remove('open');
