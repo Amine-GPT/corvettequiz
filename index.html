@@ -843,14 +843,6 @@ async function handleSignedIn(user){
     showUsernamePicker(user);
   }
 }
-  if(profile){
-    currentProfile=profile; guestName=profile.username;
-    updateAuthUI();
-  } else {
-    // New user — show username picker before proceeding
-    showUsernamePicker(user);
-  }
-}
 
 function showUsernamePicker(user){
   // Close any open modals
