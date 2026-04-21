@@ -821,13 +821,28 @@ async function initAuth(){
   const {data:{session}}=await db.auth.getSession();
   if(session) await handleSignedIn(session.user);
   db.auth.onAuthStateChange(async(event,session)=>{
-    if(session&&(event==='SIGNED_IN'||event==='TOKEN_REFRESHED')) await handleSignedIn(session.user);
+    // Only handle explicit sign in, not token refresh which causes double-fire
+    if(session && event==='SIGNED_IN'){
+      // Skip if we already have a profile loaded (prevents double-fire after username picker)
+      if(currentProfile && currentUser && currentUser.id === session.user.id) return;
+      await handleSignedIn(session.user);
+    }
     else if(event==='SIGNED_OUT'){ currentUser=null; currentProfile=null; updateAuthUI(); setGuestName(); }
   });
 }
 async function handleSignedIn(user){
   currentUser=user;
+  // Small delay to allow profile insert to complete if coming from username picker
+  await new Promise(r=>setTimeout(r,500));
   const {data:profile}=await db.from('profiles').select('username,xp,rank_title').eq('id',user.id).maybeSingle();
+  if(profile){
+    currentProfile=profile; guestName=profile.username;
+    updateAuthUI();
+  } else {
+    // New user — show username picker
+    showUsernamePicker(user);
+  }
+}
   if(profile){
     currentProfile=profile; guestName=profile.username;
     updateAuthUI();
@@ -1101,7 +1116,7 @@ async function finish(){
   try {
     const row={guest_name:guestName,score,play_date:todayStr(),xp_earned:roundXP};
     if(currentUser) row.user_id=currentUser.id;
-    if(currentProfile) row.rank_title=getRank(currentProfile.xp||0).title;
+    if(currentProfile) row.rank_title=currentProfile.rank_title||getRank(currentProfile.xp||0).title;
     await db.from('leaderboard').insert(row);
   } catch(e){console.error('Score save failed:',e);}
 
