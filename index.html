@@ -539,6 +539,19 @@ async function handleSignedIn(user){
   if(profile){
     currentProfile=profile;
     await updateLeaderboardName(user.id, profile.username);
+    // If profile XP is 0 but they played today as guest, transfer that XP
+    if((profile.xp||0)===0){
+      const lastLbId=localStorage.getItem('vq_last_lb_id');
+      if(lastLbId){
+        const {data:lbEntry}=await db.from('leaderboard').select('xp_earned').eq('id',lastLbId).maybeSingle();
+        if(lbEntry&&lbEntry.xp_earned>0){
+          const newXP=lbEntry.xp_earned;
+          const newRank=getRank(newXP);
+          await db.from('profiles').update({xp:newXP,rank_title:newRank.title}).eq('id',user.id);
+          currentProfile.xp=newXP;currentProfile.rank_title=newRank.title;
+        }
+      }
+    }
     guestName=profile.username;
     updateAuthUI();
   } else {
@@ -585,15 +598,18 @@ async function submitUsernamePicker(){
 }
 
 async function updateLeaderboardName(userId, username){
-  // Read old guest name from localStorage — guestName variable may not be set yet
-  const oldName = localStorage.getItem('vq_guest');
-  if(!oldName) return; // they never played as a guest, nothing to update
   try {
-    await db.from('leaderboard')
-      .update({guest_name: username, user_id: userId})
-      .eq('play_date', todayStr())
-      .eq('guest_name', oldName);
-  } catch(e){ console.error('Leaderboard name update failed:', e); }
+    const lastLbId=localStorage.getItem('vq_last_lb_id');
+    if(lastLbId){
+      // Update by exact row ID — most reliable, bypasses RLS guest_name issue
+      await db.from('leaderboard').update({guest_name:username,user_id:userId}).eq('id',lastLbId);
+    } else {
+      // Fallback: match by guest name and today's date
+      const oldName=localStorage.getItem('vq_guest');
+      if(!oldName)return;
+      await db.from('leaderboard').update({guest_name:username,user_id:userId}).eq('play_date',todayStr()).eq('guest_name',oldName);
+    }
+  } catch(e){console.error('Leaderboard name update failed:',e);}
 }
 
 function updateAuthUI(){
@@ -819,7 +835,8 @@ async function finish(){
     const row={guest_name:guestName,score,play_date:todayStr(),xp_earned:roundXP};
     if(currentUser)row.user_id=currentUser.id;
     if(currentProfile)row.rank_title=currentProfile.rank_title;
-    await db.from('leaderboard').insert(row);
+    const {data:lbRow}=await db.from('leaderboard').insert(row).select('id').single();
+    if(lbRow)localStorage.setItem('vq_last_lb_id',lbRow.id);
   } catch(e){console.error('Score save failed:',e);}
 
   document.getElementById('resVerdict').textContent=VERDICTS[score];
