@@ -708,13 +708,13 @@ async function renderLimitStatsForUser(totalXP){
   const localStats=loadLocalStats();
   renderStats(localStats,totalXP,0,'limit');
 }
+
+async function updateLeaderboardName(userId,username){
   try {
     const lastLbId=localStorage.getItem('vq_last_lb_id');
     if(lastLbId){
-      // Update by exact row ID — most reliable, bypasses RLS guest_name issue
       await db.from('leaderboard').update({guest_name:username,user_id:userId}).eq('id',lastLbId);
     } else {
-      // Fallback: match by guest name and today's date
       const oldName=localStorage.getItem('vq_guest');
       if(!oldName)return;
       await db.from('leaderboard').update({guest_name:username,user_id:userId}).eq('play_date',todayStr()).eq('guest_name',oldName);
@@ -955,7 +955,7 @@ function nextQ(){qIdx++;if(qIdx>=5){finish();return;}loadQ(qIdx);}
 
 async function finish(){
   stopTimer();markPlayed();
-  const streak=updateStreak();
+  const streak=await updateStreak();
   const localStats=saveLocalStats(score);
   if(score===5)roundXP+=15;
   if(streak>=7)roundXP+=15;
