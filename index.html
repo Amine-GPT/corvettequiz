@@ -351,7 +351,7 @@ body {
 <!-- HOW TO PLAY -->
 <div class="modal-bg" id="htpBg" onclick="bgClick(event,'htpBg')">
   <div class="modal">
-    <div class="modal-head"><h3>🏁 How to Play</h3><button class="modal-close" onclick="closeModal('htpBg')">✕</button></div>
+    <div class="modal-head"><h3>🏁 How to Play</h3><button class="modal-close" onclick="startFromHTP()">✕</button></div>
     <ul class="htp-list">
       <li><span class="htp-icon">📸</span><span>A new Corvette photo every day — identify the generation C1 through C8 before the timer runs out</span></li>
       <li><span class="htp-icon">📅</span><span>5 questions, same photos for everyone worldwide — one shot per day, no replays</span></li>
@@ -628,20 +628,17 @@ async function handleSignedIn(user){
     } else if(allEntries.length===1){
       await db.from('leaderboard').update({guest_name:profile.username,user_id:user.id}).eq('id',allEntries[0].id);
     }
-    // If profile XP is 0 but they played today as guest, transfer that XP
-    if((profile.xp||0)===0){
-      const lastLbId=localStorage.getItem('vq_last_lb_id');
-      if(lastLbId){
-        const {data:lbEntry}=await db.from('leaderboard').select('xp_earned').eq('id',lastLbId).maybeSingle();
-        if(lbEntry&&lbEntry.xp_earned>0){
-          const newXP=lbEntry.xp_earned;
-          const newRank=getRank(newXP);
-          await db.from('profiles').update({xp:newXP,rank_title:newRank.title}).eq('id',user.id);
-          currentProfile.xp=newXP;currentProfile.rank_title=newRank.title;
-          // Re-render limit screen stats immediately with updated XP
-          const stats=loadLocalStats();
-          renderStats(stats,newXP,0,'limit');
-        }
+    // Transfer XP from guest play to profile if they played today as a guest
+    // Works for both new accounts (xp=0) and existing accounts (xp>0)
+    const xferLbId=localStorage.getItem('vq_last_lb_id');
+    if(xferLbId){
+      const {data:lbEntry}=await db.from('leaderboard').select('xp_earned,play_date').eq('id',xferLbId).maybeSingle();
+      if(lbEntry&&lbEntry.play_date===todayStr()&&lbEntry.xp_earned>0){
+        const newXP=(profile.xp||0)+lbEntry.xp_earned;
+        const newRank=getRank(newXP);
+        await db.from('profiles').update({xp:newXP,rank_title:newRank.title}).eq('id',user.id);
+        currentProfile.xp=newXP;currentProfile.rank_title=newRank.title;
+        renderStats(loadLocalStats(),newXP,0,'limit');
       }
     }
     guestName=profile.username;
@@ -674,10 +671,41 @@ async function submitUsernamePicker(){
     const {data:ex}=await db.from('profiles').select('id').eq('username',username).maybeSingle();
     if(ex){errEl.textContent='That username is taken — try another.';return;}
     const rank=getRank(0);
-    await db.from('profiles').insert({id:user.id,username,xp:0,rank_title:rank.title});
+    await db.from('profiles').insert({id:user.id,username,xp:0,rank_title:rank.title,current_streak:0,max_streak:0});
     currentUser=user;
-    currentProfile={username,xp:0,rank_title:rank.title};
-    await updateLeaderboardName(user.id, username);
+    currentProfile={username,xp:0,rank_title:rank.title,current_streak:0,max_streak:0,last_played_date:null};
+
+    // Run same sync as handleSignedIn — streak, XP transfer, leaderboard cleanup
+    const pickerLastLbId=localStorage.getItem('vq_last_lb_id');
+    const pickerLocalStreak=parseInt(localStorage.getItem('vq_streak')||'0');
+    const pickerLocalLastPlayed=localStorage.getItem('vq_last_played');
+
+    // Streak sync
+    if(pickerLastLbId&&pickerLocalLastPlayed===todayStr()&&pickerLocalStreak>0){
+      await db.from('profiles').update({
+        current_streak:pickerLocalStreak,
+        max_streak:pickerLocalStreak,
+        last_played_date:todayStr()
+      }).eq('id',user.id);
+      currentProfile.current_streak=pickerLocalStreak;
+      currentProfile.max_streak=pickerLocalStreak;
+      currentProfile.last_played_date=todayStr();
+      loadStreakUI(pickerLocalStreak);
+    }
+
+    // XP transfer from guest play today
+    if(pickerLastLbId){
+      const {data:lbEntry}=await db.from('leaderboard').select('xp_earned,play_date').eq('id',pickerLastLbId).maybeSingle();
+      if(lbEntry&&lbEntry.play_date===todayStr()&&lbEntry.xp_earned>0){
+        const newXP=lbEntry.xp_earned;
+        const newRank=getRank(newXP);
+        await db.from('profiles').update({xp:newXP,rank_title:newRank.title}).eq('id',user.id);
+        currentProfile.xp=newXP;currentProfile.rank_title=newRank.title;
+      }
+    }
+
+    // Leaderboard name update
+    await updateLeaderboardName(user.id,username);
     guestName=username;
     window._pendingUser=null;
     document.getElementById('usernamePickerBg').classList.remove('open');
@@ -1031,8 +1059,9 @@ async function renderBoard(filter){
     if(filter==='today'){
       ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').eq('play_date',todayStr()).order('xp_earned',{ascending:false}).limit(50));
     } else if(filter==='monthly'){
-      const now=new Date();
-      const monthStart=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`;
+      // Use PDT (UTC-7) for month boundary to match quiz reset timezone
+      const pdtNow=new Date(Date.now()-7*60*60*1000);
+      const monthStart=`${pdtNow.getUTCFullYear()}-${String(pdtNow.getUTCMonth()+1).padStart(2,'0')}-01`;
       // Get all monthly entries then deduplicate by guest_name keeping highest XP
       ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').gte('play_date',monthStart).order('xp_earned',{ascending:false}).limit(500));
       if(data){
@@ -1043,7 +1072,15 @@ async function renderBoard(filter){
         data=[...seen.values()].sort((a,b)=>b.xp_earned-a.xp_earned).slice(0,50);
       }
     } else {
-      ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').order('xp_earned',{ascending:false}).limit(50));
+      // All Time — deduplicate by guest_name keeping highest XP per player
+      ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').order('xp_earned',{ascending:false}).limit(500));
+      if(data){
+        const seen=new Map();
+        data.forEach(e=>{
+          if(!seen.has(e.guest_name)||e.xp_earned>seen.get(e.guest_name).xp_earned) seen.set(e.guest_name,e);
+        });
+        data=[...seen.values()].sort((a,b)=>b.xp_earned-a.xp_earned).slice(0,50);
+      }
     }
     if(error)throw error;
     if(!data||data.length===0){list.innerHTML='<div class="lb-empty">No scores yet — be the first! 🏁</div>';return;}
