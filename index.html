@@ -586,6 +586,23 @@ async function handleSignedIn(user){
   if(profile){
     currentProfile=profile;
     loadStreakUI(profile.current_streak||0);
+
+    // If they played today as guest but profile streak wasn't updated, sync it
+    const guestLastLbId=localStorage.getItem('vq_last_lb_id');
+    const localStreak=parseInt(localStorage.getItem('vq_streak')||'0');
+    const localLastPlayed=localStorage.getItem('vq_last_played');
+    if(guestLastLbId && localLastPlayed===todayStr() && localStreak>(profile.current_streak||0)){
+      const maxS=Math.max(localStreak, profile.max_streak||0);
+      await db.from('profiles').update({
+        current_streak:localStreak,
+        max_streak:maxS,
+        last_played_date:todayStr()
+      }).eq('id',user.id);
+      currentProfile.current_streak=localStreak;
+      currentProfile.max_streak=maxS;
+      currentProfile.last_played_date=todayStr();
+      loadStreakUI(localStreak);
+    }
     await updateLeaderboardName(user.id, profile.username);
 
     // Clean up ALL of today's entries — match by user_id, username, or last play ID
@@ -600,9 +617,11 @@ async function handleSignedIn(user){
       if(seen.has(e.id))return false;seen.add(e.id);return true;
     });
     if(allEntries.length>1){
-      allEntries.sort((a,b)=>b.xp_earned-a.xp_earned);
-      const keepId=allEntries[0].id;
-      await db.from('leaderboard').delete().in('id',allEntries.slice(1).map(r=>r.id));
+      // Keep the FIRST play — fetch with created_at to find oldest
+      const ids=allEntries.map(r=>r.id);
+      const {data:withTime}=await db.from('leaderboard').select('id,created_at').in('id',ids).order('created_at',{ascending:true});
+      const keepId=(withTime&&withTime.length>0)?withTime[0].id:allEntries[0].id;
+      await db.from('leaderboard').delete().in('id',ids.filter(id=>id!==keepId));
       await db.from('leaderboard').update({guest_name:profile.username,user_id:user.id}).eq('id',keepId);
     } else if(allEntries.length===1){
       await db.from('leaderboard').update({guest_name:profile.username,user_id:user.id}).eq('id',allEntries[0].id);
