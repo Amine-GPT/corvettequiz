@@ -319,7 +319,6 @@ body {
         <div class="stat-item"><div class="stat-num gold" id="limitStatXP">—</div><div class="stat-label">Total XP</div></div>
         <div class="stat-item"><div class="stat-num" id="limitStatBest">0</div><div class="stat-label">Best</div></div>
       </div>
-      <button class="lb-link" onclick="openModal()">🏆 See Leaderboard</button>
     </div>
   </div>
 </div>
@@ -785,13 +784,7 @@ async function finish(){
   if(streak>=7)roundXP+=15;
   else if(streak>=3)roundXP+=5;
 
-  try {
-    const row={guest_name:guestName,score,play_date:todayStr(),xp_earned:roundXP};
-    if(currentUser)row.user_id=currentUser.id;
-    if(currentProfile)row.rank_title=currentProfile.rank_title||getRank(currentProfile.xp||0).title;
-    await db.from('leaderboard').insert(row);
-  } catch(e){console.error('Score save failed:',e);}
-
+  // Update XP first so leaderboard gets correct values
   if(currentUser&&currentProfile){
     const newXP=(currentProfile.xp||0)+roundXP;
     const newRank=getRank(newXP);
@@ -801,6 +794,14 @@ async function finish(){
   } else {
     document.getElementById('resSavePrompt').style.display='block';
   }
+
+  // Save to leaderboard with correct XP and rank
+  try {
+    const row={guest_name:guestName,score,play_date:todayStr(),xp_earned:roundXP};
+    if(currentUser)row.user_id=currentUser.id;
+    if(currentProfile)row.rank_title=currentProfile.rank_title;
+    await db.from('leaderboard').insert(row);
+  } catch(e){console.error('Score save failed:',e);}
 
   document.getElementById('resVerdict').textContent=VERDICTS[score];
   const scoreEl=document.getElementById('resScore');
