@@ -545,11 +545,31 @@ async function handleSignedIn(user){
   if(profile){
     currentProfile=profile;
     await updateLeaderboardName(user.id, profile.username);
-    // Remove duplicate entries — keep only the highest XP entry for today
-    const {data:todayEntries}=await db.from('leaderboard').select('id,xp_earned').eq('user_id',user.id).eq('play_date',todayStr()).order('xp_earned',{ascending:false});
-    if(todayEntries&&todayEntries.length>1){
-      const idsToDelete=todayEntries.slice(1).map(r=>r.id);
+
+    // Clean up ALL of today's entries for this user — covers both signed-in plays and guest plays
+    const lastLbId=localStorage.getItem('vq_last_lb_id');
+    let query=db.from('leaderboard').select('id,xp_earned').eq('play_date',todayStr());
+    // Find entries by user_id OR by the last guest play ID
+    const {data:userEntries}=await db.from('leaderboard').select('id,xp_earned').eq('play_date',todayStr()).eq('user_id',user.id);
+    const {data:guestEntry}=lastLbId ? await db.from('leaderboard').select('id,xp_earned').eq('id',lastLbId) : {data:null};
+    
+    // Combine all today's entries for this user
+    const allEntries=[...(userEntries||[])];
+    if(guestEntry&&guestEntry.length>0){
+      const ge=guestEntry[0];
+      if(!allEntries.find(e=>e.id===ge.id)) allEntries.push(ge);
+    }
+
+    if(allEntries.length>1){
+      // Keep highest XP, delete the rest, update winner with user info
+      allEntries.sort((a,b)=>b.xp_earned-a.xp_earned);
+      const keepId=allEntries[0].id;
+      const idsToDelete=allEntries.slice(1).map(r=>r.id);
       await db.from('leaderboard').delete().in('id',idsToDelete);
+      await db.from('leaderboard').update({guest_name:profile.username,user_id:user.id}).eq('id',keepId);
+    } else if(allEntries.length===1){
+      // Single entry — just make sure it has the right user info
+      await db.from('leaderboard').update({guest_name:profile.username,user_id:user.id}).eq('id',allEntries[0].id);
     }
     // If profile XP is 0 but they played today as guest, transfer that XP
     if((profile.xp||0)===0){
@@ -685,7 +705,13 @@ async function submitAuth(){
       closeModal('authBg');
     }
   } catch(err){
-    errEl.textContent=err.message.includes('Invalid login')?'Incorrect email or password.':err.message;
+    const msg=err.message||'';
+    if(msg.includes('already registered')||msg.includes('already exists')||msg.includes('duplicate')){
+      errEl.textContent='An account with this email already exists. Please sign in instead.';
+      setAuthMode('signin');
+    } else {
+      errEl.textContent=msg.includes('Invalid login')?'Incorrect email or password.':msg;
+    }
   } finally {btn.disabled=false;btn.textContent='CONTINUE →';}
 }
 
