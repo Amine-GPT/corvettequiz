@@ -585,12 +585,14 @@ async function submitUsernamePicker(){
 }
 
 async function updateLeaderboardName(userId, username){
-  // If they played today as a guest, update that entry with their real name and user_id
+  // Read old guest name from localStorage — guestName variable may not be set yet
+  const oldName = localStorage.getItem('vq_guest');
+  if(!oldName) return; // they never played as a guest, nothing to update
   try {
     await db.from('leaderboard')
       .update({guest_name: username, user_id: userId})
       .eq('play_date', todayStr())
-      .eq('guest_name', guestName);
+      .eq('guest_name', oldName);
   } catch(e){ console.error('Leaderboard name update failed:', e); }
 }
 
