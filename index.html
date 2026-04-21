@@ -673,6 +673,24 @@ body {
   </div>
 </div>
 
+<!-- USERNAME PICKER MODAL (shown to new Google users) -->
+<div class="modal-bg" id="usernamePickerBg">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>👤 Choose a Username</h3>
+    </div>
+    <p style="font-size:14px;color:var(--muted);margin-bottom:18px;line-height:1.6;">
+      You're almost in! Pick a username — this is what shows on the leaderboard.
+    </p>
+    <input class="auth-input" id="usernamePickerInput" type="text"
+      placeholder="Enter a username" maxlength="20" autocomplete="off"
+      onkeydown="if(event.key==='Enter') submitUsernamePicker()" />
+    <div class="auth-hint">3–20 characters · letters, numbers, underscores only</div>
+    <div class="auth-error" id="usernamePickerError"></div>
+    <button class="auth-submit" id="usernamePickerBtn" onclick="submitUsernamePicker()">LET'S GO →</button>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 const SUPABASE_URL = 'https://ggdwlfqpjqkyeubqbdvg.supabase.co';
@@ -812,16 +830,56 @@ async function handleSignedIn(user){
   const {data:profile}=await db.from('profiles').select('username,xp,rank_title').eq('id',user.id).maybeSingle();
   if(profile){
     currentProfile=profile; guestName=profile.username;
+    updateAuthUI();
   } else {
-    const gName=user.user_metadata?.full_name||user.user_metadata?.name;
-    if(gName){
-      const username=gName.replace(/[^a-zA-Z0-9_]/g,'_').slice(0,20);
-      const rank=getRank(0);
-      await db.from('profiles').insert({id:user.id,username,xp:0,rank_title:rank.title});
-      currentProfile={username,xp:0,rank_title:rank.title}; guestName=username;
-    }
+    // New user — show username picker before proceeding
+    showUsernamePicker(user);
   }
-  updateAuthUI();
+}
+
+function showUsernamePicker(user){
+  // Close any open modals
+  ['authBg','htpBg','modalBg','aboutBg'].forEach(id=>{
+    document.getElementById(id).classList.remove('open');
+  });
+  document.getElementById('usernamePickerBg').classList.add('open');
+  document.getElementById('usernamePickerError').textContent='';
+  document.getElementById('usernamePickerInput').value='';
+  // Store user for later
+  window._pendingUser = user;
+}
+
+async function submitUsernamePicker(){
+  const username = document.getElementById('usernamePickerInput').value.trim();
+  const errEl    = document.getElementById('usernamePickerError');
+  const btn      = document.getElementById('usernamePickerBtn');
+  errEl.textContent='';
+
+  if(!username){ errEl.textContent='Please enter a username.'; return; }
+  if(username.length<3){ errEl.textContent='Must be at least 3 characters.'; return; }
+  if(!/^[a-zA-Z0-9_]+$/.test(username)){ errEl.textContent='Letters, numbers and underscores only.'; return; }
+
+  btn.disabled=true; btn.textContent='SAVING...';
+
+  try {
+    const {data:ex}=await db.from('profiles').select('id').eq('username',username).maybeSingle();
+    if(ex){ errEl.textContent='That username is taken — try another.'; return; }
+
+    const user  = window._pendingUser;
+    const rank  = getRank(0);
+    await db.from('profiles').insert({id:user.id, username, xp:0, rank_title:rank.title});
+
+    currentProfile = {username, xp:0, rank_title:rank.title};
+    guestName      = username;
+    window._pendingUser = null;
+
+    document.getElementById('usernamePickerBg').classList.remove('open');
+    updateAuthUI();
+  } catch(err){
+    errEl.textContent = err.message;
+  } finally {
+    btn.disabled=false; btn.textContent='LET\'S GO →';
+  }
 }
 function updateAuthUI(){
   const signInBtn=document.getElementById('signInBtn');
