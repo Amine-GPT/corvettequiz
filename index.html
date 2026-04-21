@@ -470,30 +470,69 @@ function setHeaderDate(){
   document.getElementById('headerDate').textContent=`${days[d.getDay()]} · ${months[d.getMonth()]} ${d.getDate()}`;
 }
 
-function loadStreak(){
-  const s=parseInt(localStorage.getItem('vq_streak')||'0');
-  currentStreak=s;
-  document.getElementById('streakNum').textContent=s;
-  document.getElementById('limitStreakNum').textContent=s;
-  document.getElementById('streakPill').style.display=s>0?'flex':'none';
-}
-function updateStreak(){
-  const yesterday=new Date();yesterday.setDate(yesterday.getDate()-1);
-  const yStr=yesterday.toISOString().slice(0,10);
-  const last=localStorage.getItem('vq_last_played');
-  let s=parseInt(localStorage.getItem('vq_streak')||'0');
-  if(last===yStr)s++;
-  else if(last===todayStr()){}
-  else s=1;
-  localStorage.setItem('vq_streak',s);
-  localStorage.setItem('vq_last_played',todayStr());
-  currentStreak=s;
-  document.getElementById('streakNum').textContent=s;
-  document.getElementById('resStreakNum').textContent=s;
-  document.getElementById('streakPill').style.display=s>0?'flex':'none';
-  return s;
+/* ── STREAK ──────────────────────────────────── */
+function loadStreakUI(streak){
+  currentStreak=streak;
+  document.getElementById('streakNum').textContent=streak;
+  document.getElementById('limitStreakNum').textContent=streak;
+  document.getElementById('streakPill').style.display=streak>0?'flex':'none';
 }
 
+function loadStreak(){
+  // For guests — load from localStorage
+  if(!currentUser){
+    const s=parseInt(localStorage.getItem('vq_streak')||'0');
+    loadStreakUI(s);
+  }
+  // For signed-in users — loaded in handleSignedIn from Supabase profile
+}
+
+async function updateStreak(){
+  const pdtNow=new Date(Date.now()-7*60*60*1000);
+  const pdtYesterday=new Date(pdtNow);
+  pdtYesterday.setDate(pdtYesterday.getDate()-1);
+  const yStr=pdtYesterday.toISOString().slice(0,10);
+  const today=todayStr();
+
+  if(currentUser&&currentProfile){
+    // Supabase-backed streak for signed-in users
+    const last=currentProfile.last_played_date;
+    let s=currentProfile.current_streak||0;
+    if(last===yStr) s++;
+    else if(last===today) {} // already played today
+    else s=1;
+    const maxS=Math.max(s, currentProfile.max_streak||0);
+    await db.from('profiles').update({
+      current_streak:s,
+      max_streak:maxS,
+      last_played_date:today
+    }).eq('id',currentUser.id);
+    currentProfile.current_streak=s;
+    currentProfile.max_streak=maxS;
+    currentProfile.last_played_date=today;
+    // Also sync localStorage as fallback
+    localStorage.setItem('vq_streak',s);
+    localStorage.setItem('vq_last_played',today);
+    loadStreakUI(s);
+    document.getElementById('resStreakNum').textContent=s;
+    return s;
+  } else {
+    // Guest — localStorage only
+    const last=localStorage.getItem('vq_last_played');
+    let s=parseInt(localStorage.getItem('vq_streak')||'0');
+    if(last===yStr) s++;
+    else if(last===today) {}
+    else s=1;
+    localStorage.setItem('vq_streak',s);
+    localStorage.setItem('vq_last_played',today);
+    currentStreak=s;
+    loadStreakUI(s);
+    document.getElementById('resStreakNum').textContent=s;
+    return s;
+  }
+}
+
+/* ── LOCAL STATS (guests only) ───────────────── */
 function loadLocalStats(){return JSON.parse(localStorage.getItem('vq_stats')||'{"played":0,"totalScore":0,"dist":[0,0,0,0,0,0],"maxStreak":0}');}
 function saveLocalStats(sc){
   const s=loadLocalStats();
@@ -503,15 +542,17 @@ function saveLocalStats(sc){
   localStorage.setItem('vq_stats',JSON.stringify(s));
   return s;
 }
+
 function renderStats(stats,totalXP,roundXP,target){
   const avg=stats.played>0?(stats.totalScore/stats.played).toFixed(1):'0.0';
-  const streak=parseInt(localStorage.getItem('vq_streak')||'0');
+  const streak=currentUser?(currentProfile?.current_streak||0):parseInt(localStorage.getItem('vq_streak')||'0');
+  const best=currentUser?(currentProfile?.max_streak||0):(stats.maxStreak||0);
   if(target==='limit'){
     document.getElementById('limitStatPlayed').textContent=stats.played;
     document.getElementById('limitStatAvg').textContent=avg;
     document.getElementById('limitStatXP').textContent=totalXP!==null?totalXP:'—';
     document.getElementById('limitStatStreak').textContent=streak;
-    document.getElementById('limitStatBest').textContent=stats.maxStreak||0;
+    document.getElementById('limitStatBest').textContent=best;
     return;
   }
   document.getElementById('statPlayed').textContent=stats.played;
@@ -521,7 +562,7 @@ function renderStats(stats,totalXP,roundXP,target){
   if(totalXP!==null){xpEl.textContent=totalXP;xpLabelEl.textContent='Total XP';}
   else{xpEl.textContent='+'+roundXP;xpLabelEl.textContent='This Round';}
   document.getElementById('statStreak').textContent=streak;
-  document.getElementById('statBest').textContent=stats.maxStreak||0;
+  document.getElementById('statBest').textContent=best;
 }
 
 /* AUTH */
@@ -541,9 +582,10 @@ async function initAuth(){
 async function handleSignedIn(user){
   if(currentProfile&&currentUser&&currentUser.id===user.id)return;
   currentUser=user;
-  const {data:profile}=await db.from('profiles').select('username,xp,rank_title').eq('id',user.id).maybeSingle();
+  const {data:profile}=await db.from('profiles').select('username,xp,rank_title,current_streak,max_streak,last_played_date').eq('id',user.id).maybeSingle();
   if(profile){
     currentProfile=profile;
+    loadStreakUI(profile.current_streak||0);
     await updateLeaderboardName(user.id, profile.username);
 
     // Clean up ALL of today's entries — match by user_id, username, or last play ID
@@ -626,7 +668,46 @@ async function submitUsernamePicker(){
   }
 }
 
-async function updateLeaderboardName(userId, username){
+async function renderStatsForUser(totalXP){
+  try {
+    const {data}=await db.from('leaderboard').select('score').eq('user_id',currentUser.id);
+    if(data&&data.length>0){
+      const played=data.length;
+      const avg=(data.reduce((s,r)=>s+r.score,0)/played).toFixed(1);
+      const streak=currentProfile?.current_streak||0;
+      const best=currentProfile?.max_streak||0;
+      document.getElementById('statPlayed').textContent=played;
+      document.getElementById('statAvg').textContent=avg;
+      document.getElementById('statXP').textContent=totalXP;
+      document.getElementById('statXPLabel').textContent='Total XP';
+      document.getElementById('statStreak').textContent=streak;
+      document.getElementById('statBest').textContent=best;
+      return;
+    }
+  } catch(e){console.error('Stats fetch failed:',e);}
+  const localStats=loadLocalStats();
+  renderStats(localStats,totalXP,0);
+}
+
+async function renderLimitStatsForUser(totalXP){
+  try {
+    const {data}=await db.from('leaderboard').select('score').eq('user_id',currentUser.id);
+    if(data&&data.length>0){
+      const played=data.length;
+      const avg=(data.reduce((s,r)=>s+r.score,0)/played).toFixed(1);
+      const streak=currentProfile?.current_streak||0;
+      const best=currentProfile?.max_streak||0;
+      document.getElementById('limitStatPlayed').textContent=played;
+      document.getElementById('limitStatAvg').textContent=avg;
+      document.getElementById('limitStatXP').textContent=totalXP!==null?totalXP:'—';
+      document.getElementById('limitStatStreak').textContent=streak;
+      document.getElementById('limitStatBest').textContent=best;
+      return;
+    }
+  } catch(e){console.error('Limit stats fetch failed:',e);}
+  const localStats=loadLocalStats();
+  renderStats(localStats,totalXP,0,'limit');
+}
   try {
     const lastLbId=localStorage.getItem('vq_last_lb_id');
     if(lastLbId){
@@ -751,9 +832,9 @@ async function init(){
   if(currentUser){
     const {data:todayEntry}=await db.from('leaderboard').select('id').eq('user_id',currentUser.id).eq('play_date',todayStr()).maybeSingle();
     if(todayEntry){
-      markPlayed(); // sync localStorage
-      const stats=loadLocalStats();
-      renderStats(stats,currentProfile?currentProfile.xp:null,0,'limit');
+      markPlayed();
+      if(currentProfile) await renderLimitStatsForUser(currentProfile.xp);
+      else { const stats=loadLocalStats(); renderStats(stats,null,0,'limit'); }
       showScreen('screenLimit');return;
     }
   }
@@ -766,7 +847,8 @@ async function init(){
   }
   if(hasPlayed()){
     const stats=loadLocalStats();
-    renderStats(stats,currentProfile?currentProfile.xp:null,0,'limit');
+    if(currentUser&&currentProfile) await renderLimitStatsForUser(currentProfile.xp);
+    else renderStats(stats,currentProfile?currentProfile.xp:null,0,'limit');
     showScreen('screenLimit');return;
   }
   await loadQuestions();
@@ -909,7 +991,12 @@ async function finish(){
   if(streak===1&&localStats.played===1)streakPillEl.innerHTML='🎉 First Quiz!';
   else streakPillEl.innerHTML=`🔥 ${streak} day streak`;
   document.getElementById('progFill').style.width='100%';
-  renderStats(localStats,currentProfile?currentProfile.xp:null,roundXP);
+  // Render stats — use Supabase data for signed-in users, localStorage for guests
+  if(currentUser&&currentProfile){
+    await renderStatsForUser(currentProfile.xp);
+  } else {
+    renderStats(localStats,null,roundXP);
+  }
   showScreen('screenResult');
 }
 
