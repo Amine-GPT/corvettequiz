@@ -461,6 +461,11 @@ const hasPlayed=()=>localStorage.getItem('vq_done_'+todayStr())==='1';
 const markPlayed=()=>localStorage.setItem('vq_done_'+todayStr(),'1');
 const show=id=>document.getElementById(id).classList.add('active');
 const hide=id=>document.getElementById(id).classList.remove('active');
+function shuffle(arr){
+  const a=[...arr];
+  for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}
+  return a;
+}
 function resetGameState(){
   qIdx=0;score=0;answered=false;scoreEmoji=[];roundXP=0;timerLeft=TIMER_SECONDS;
 }
