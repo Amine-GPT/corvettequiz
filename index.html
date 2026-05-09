@@ -10,11 +10,30 @@
 <meta property="og:description" content="Ever spotted a Corvette and wondered which generation it was? Five questions a day — free to play.">
 <meta property="og:url" content="https://corvettequiz.com">
 <meta property="og:type" content="website">
-<meta property="og:image" content="https://img1.wsimg.com/isteam/getty/471063241/:/rs=w:1280,h:851">
+<meta property="og:site_name" content="VetteQuiz">
+<meta property="og:image" content="https://corvettequiz.com/assets/og.jpg">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://img1.wsimg.com/isteam/getty/471063241/:/rs=w:1280,h:851">
+<meta name="twitter:image" content="https://corvettequiz.com/assets/og.jpg">
 <link rel="canonical" href="https://corvettequiz.com">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏁</text></svg>">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "Corvette Generation Quiz",
+  "alternateName": "VetteQuiz",
+  "url": "https://corvettequiz.com/",
+  "description": "Daily Corvette generation identification quiz. Five photos, 15 seconds each, new every day.",
+  "applicationCategory": "GameApplication",
+  "genre": "Trivia",
+  "operatingSystem": "Web",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  }
+}
+</script>
 <!-- Google Analytics -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-C708LHJZCG"></script>
 <script>
@@ -36,7 +55,7 @@
 }
 body {
   background-color: var(--bg);
-  background-image: linear-gradient(to bottom,rgba(0,0,0,.10) 0%,rgba(0,0,0,.28) 50%,rgba(0,0,0,.62) 100%), url('https://img1.wsimg.com/isteam/getty/471063241/:/rs=w:1280,h:851');
+  background-image: linear-gradient(to bottom,rgba(0,0,0,.10) 0%,rgba(0,0,0,.28) 50%,rgba(0,0,0,.62) 100%), url('/assets/bg.jpg');
   background-size: cover; background-position: center top; background-attachment: fixed;
   min-height: 100vh; display: flex; flex-direction: column; align-items: center;
   font-family: 'Rajdhani', sans-serif; color: var(--text); padding: 24px 16px 40px;
@@ -587,6 +606,9 @@ function renderStats(stats,totalXP,roundXP,target){
     document.getElementById('limitStatXP').textContent=totalXP!==null?totalXP:'—';
     document.getElementById('limitStatStreak').textContent=streak;
     document.getElementById('limitStatBest').textContent=best;
+    // B8: hide "🔥 0 day streak — keep it going!" pill entirely when streak is 0.
+    const lsEl=document.querySelector('.limit-streak');
+    if(lsEl)lsEl.style.display=streak>0?'':'none';
     return;
   }
   document.getElementById('statPlayed').textContent=stats.played;
@@ -1069,8 +1091,15 @@ function nextQ(){qIdx++;if(qIdx>=5){finish();return;}loadQ(qIdx);}
 
 async function finish(){
   stopTimer();markPlayed();
+  // B10: capture pre-play "first ever" state BEFORE updateStreak modifies it.
+  // Signed-in: first ever requires no last_played_date AND no prior XP.
+  // Guest: first ever requires no vq_last_played in localStorage.
+  const wasFirstEverPlay=currentUser
+    ?(!currentProfile?.last_played_date && !(currentProfile?.xp>0))
+    :!localStorage.getItem('vq_last_played');
   const streak=await updateStreak();
-  const localStats=saveLocalStats(score);
+  // B17: skip saveLocalStats for signed-in users — their stats live in Supabase.
+  const localStats=currentProfile?null:saveLocalStats(score);
   if(score===5)roundXP+=15;
   if(streak>=7)roundXP+=15;
   else if(streak>=3)roundXP+=5;
@@ -1102,7 +1131,9 @@ async function finish(){
   document.getElementById('resXpNum').textContent='+'+roundXP;
   document.getElementById('resStreakNum').textContent=streak;
   const streakPillEl=document.getElementById('resStreakPill');
-  if(streak===1&&localStats.played===1)streakPillEl.innerHTML='🎉 First Quiz!';
+  // B10: gate "First Quiz!" on captured pre-play history, not on localStats.played
+  // (which is unreliable when localStorage was cleared after prior plays).
+  if(wasFirstEverPlay)streakPillEl.innerHTML='🎉 First Quiz!';
   else streakPillEl.innerHTML=`🔥 ${streak} day streak`;
   document.getElementById('progFill').style.width='100%';
   // Render stats — use Supabase data for signed-in users, localStorage for guests
@@ -1120,15 +1151,18 @@ async function renderBoard(filter){
   const list=document.getElementById('lbList');
   list.innerHTML='<div class="lb-empty">Loading...</div>';
   try {
-    let data,error;
+    let data,timedOut=false;
+    const cols='guest_name,score,xp_earned,rank_title,user_id';
     if(filter==='today'){
-      ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').eq('play_date',todayStr()).order('xp_earned',{ascending:false}).limit(50));
+      const sv=await dbCall(()=>db.from('leaderboard').select(cols).eq('play_date',todayStr()).order('xp_earned',{ascending:false}).limit(50));
+      ({data,timedOut}=sv);
     } else if(filter==='monthly'){
       // Use PDT (UTC-7) for month boundary to match quiz reset timezone
       const pdtNow=new Date(Date.now()-7*60*60*1000);
       const monthStart=`${pdtNow.getUTCFullYear()}-${String(pdtNow.getUTCMonth()+1).padStart(2,'0')}-01`;
       // Get all monthly entries then deduplicate by guest_name keeping highest XP
-      ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').gte('play_date',monthStart).order('xp_earned',{ascending:false}).limit(500));
+      const sv=await dbCall(()=>db.from('leaderboard').select(cols).gte('play_date',monthStart).order('xp_earned',{ascending:false}).limit(500));
+      ({data,timedOut}=sv);
       if(data){
         const seen=new Map();
         data.forEach(e=>{
@@ -1138,7 +1172,8 @@ async function renderBoard(filter){
       }
     } else {
       // All Time — deduplicate by guest_name keeping highest XP per player
-      ({data,error}=await db.from('leaderboard').select('guest_name,score,xp_earned,rank_title').order('xp_earned',{ascending:false}).limit(500));
+      const sv=await dbCall(()=>db.from('leaderboard').select(cols).order('xp_earned',{ascending:false}).limit(500));
+      ({data,timedOut}=sv);
       if(data){
         const seen=new Map();
         data.forEach(e=>{
@@ -1147,18 +1182,37 @@ async function renderBoard(filter){
         data=[...seen.values()].sort((a,b)=>b.xp_earned-a.xp_earned).slice(0,50);
       }
     }
-    if(error)throw error;
+    if(timedOut){list.innerHTML='<div class="lb-empty">Slow connection.</div>';return;}
     if(!data||data.length===0){list.innerHTML='<div class="lb-empty">No scores yet — be the first! 🏁</div>';return;}
+    // B34: two-step JOIN — fetch current rank_title from profiles for signed-in rows.
+    // No FK declared between leaderboard.user_id and profiles.id (PGRST200), so
+    // PostgREST cannot auto-resolve via select('*, profiles(...)') even with hint syntax.
+    const userIds=[...new Set(data.map(e=>e.user_id).filter(Boolean))];
+    const profileMap=new Map();
+    if(userIds.length>0){
+      const pv=await dbCall(()=>db.from('profiles').select('id,rank_title').in('id',userIds));
+      if(!pv.timedOut && pv.data){
+        pv.data.forEach(p=>profileMap.set(p.id,p.rank_title));
+      }
+    }
     // B5: escape user-controlled guest_name and rank_title before innerHTML interpolation.
-    list.innerHTML=data.map((e,i)=>`
+    // B11: derive icon from displayed title so icon and text always agree.
+    // B15: prefix XP with "X/5 · " when score is numeric.
+    list.innerHTML=data.map((e,i)=>{
+      const title=(e.user_id && profileMap.get(e.user_id)) || e.rank_title || 'Vette Curious';
+      const icon=(RANKS.find(r=>r.title===title)||RANKS[0]).icon;
+      const scorePrefix=(typeof e.score==='number')?`${e.score}/5 · `:'';
+      const xpLabel=e.xp_earned?`${scorePrefix}+${e.xp_earned}`:'—';
+      return `
       <div class="lb-row">
         <div class="lb-rank ${i===0?'g1':i===1?'g2':i===2?'g3':''}">${i+1}</div>
         <div class="lb-info">
           <div class="lb-name">${escapeHtml(e.guest_name)}</div>
-          <div class="lb-rank-title">${getRank(e.xp_earned||0).icon} ${escapeHtml(e.rank_title||'Vette Curious')}</div>
+          <div class="lb-rank-title">${icon} ${escapeHtml(title)}</div>
         </div>
-        <div class="lb-xp">${e.xp_earned?'+'+e.xp_earned:'—'} <span style="font-size:10px;color:var(--muted)">XP</span></div>
-      </div>`).join('');
+        <div class="lb-xp">${xpLabel} <span style="font-size:10px;color:var(--muted)">XP</span></div>
+      </div>`;
+    }).join('');
   } catch(err){list.innerHTML='<div class="lb-empty">Could not load leaderboard.</div>';}
 }
 
