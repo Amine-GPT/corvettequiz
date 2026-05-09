@@ -431,6 +431,25 @@ const SUPABASE_URL='https://ggdwlfqpjqkyeubqbdvg.supabase.co';
 const SUPABASE_KEY='sb_publishable_G3kv5FzuhCNRBXFXmVHvIQ_W55NnzkF';
 const db=supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
 
+// Wraps a Supabase call with timeout + single retry. Applied only to load-path
+// calls (B30 fix). Returns {data, error, timedOut}; on timedOut callers fall through.
+async function dbCall(fn,timeout=5000){
+  const attempt=()=>new Promise(resolve=>{
+    let settled=false;
+    const t=setTimeout(()=>{if(!settled){settled=true;resolve({data:null,error:new Error('timeout'),timedOut:true});}},timeout);
+    Promise.resolve().then(fn).then(
+      r=>{if(!settled){settled=true;clearTimeout(t);resolve({data:r?.data??null,error:r?.error??null,timedOut:false});}},
+      err=>{if(!settled){settled=true;clearTimeout(t);resolve({data:null,error:err,timedOut:false});}}
+    );
+  });
+  let r=await attempt();
+  if(r.timedOut)r=await attempt();
+  return r;
+}
+
+// Escape user-controlled strings before innerHTML interpolation (B5 fix).
+function escapeHtml(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
 const RANKS=[
   {title:'Vette Curious',icon:'🔎',xp:0},
   {title:'Vette Spotter',icon:'🏎️',xp:150},
@@ -582,7 +601,9 @@ function renderStats(stats,totalXP,roundXP,target){
 
 /* AUTH */
 async function initAuth(){
-  const {data:{session}}=await db.auth.getSession();
+  // B30: wrap getSession with timeout so a cold-start hang doesn't block init.
+  const sv=await dbCall(()=>db.auth.getSession());
+  const session=sv.timedOut?null:sv.data?.session;
   if(session)await handleSignedIn(session.user);
   db.auth.onAuthStateChange(async(event,session)=>{
     if(session&&event==='SIGNED_IN'){
@@ -886,14 +907,26 @@ function setAuthMode(mode){
 
 /* INIT */
 async function init(){
+  // B6: clear vq_last_lb_id on day rollover. If the user has not played today
+  // (no vq_done_<today> flag), any stored ID is from a previous day and stale.
+  if(localStorage.getItem('vq_last_lb_id') && !hasPlayed()){
+    localStorage.removeItem('vq_last_lb_id');
+  }
   setHeaderDate();loadStreak();
-  await initAuth();
+
+  // B30: kick off auth and questions in parallel — independent for guests, and
+  // even for signed-in users the questions fetch doesn't depend on auth state.
+  const authP=initAuth();
+  const questionsP=loadQuestions();
+
+  await authP;
   if(!currentProfile)setGuestName();
 
-  // Server-side check for signed-in users — localStorage can be cleared
+  // Server-side check for signed-in users — localStorage can be cleared.
   if(currentUser){
-    const {data:todayEntry}=await db.from('leaderboard').select('id').eq('user_id',currentUser.id).eq('play_date',todayStr()).maybeSingle();
-    if(todayEntry){
+    const sv=await dbCall(()=>db.from('leaderboard').select('id').eq('user_id',currentUser.id).eq('play_date',todayStr()).maybeSingle());
+    if(!sv.timedOut && sv.data){
+      await questionsP; // drain background fetch
       markPlayed();
       if(currentProfile) await renderLimitStatsForUser(currentProfile.xp);
       else { const stats=loadLocalStats(); renderStats(stats,null,0,'limit'); }
@@ -901,10 +934,17 @@ async function init(){
     }
   }
 
+  await questionsP;
+
+  // B30: pre-warm Q1 image now that questions are ready, before any branch
+  // that might delay the user clicking through (HTP modal, etc.).
+  if(questions && questions.length>=1 && questions[0]?.src){
+    const pre=new Image();pre.src=questions[0].src;
+  }
+
   if(!localStorage.getItem('vq_seen_htp')){
     localStorage.setItem('vq_seen_htp','1');
     openHTP();
-    await loadQuestions();
     return;
   }
   if(hasPlayed()){
@@ -913,13 +953,16 @@ async function init(){
     else renderStats(stats,currentProfile?currentProfile.xp:null,0,'limit');
     showScreen('screenLimit');return;
   }
-  await loadQuestions();
   if(questions&&questions.length>=5){resetGameState();buildGrid();loadQ(0);quizStarted=true;}
 }
 
 async function loadQuestions(){
   try {
-    const {data:existing}=await db.from('daily_sets').select('image_id,images(storage_url,generation)').eq('play_date',todayStr());
+    // B30: wrap daily_sets fetch with timeout so cold-start hang surfaces as
+    // "Slow connection" rather than a permanent skeleton.
+    const sv=await dbCall(()=>db.from('daily_sets').select('image_id,images(storage_url,generation)').eq('play_date',todayStr()));
+    if(sv.timedOut){document.getElementById('qCounter').textContent='Slow connection.';return;}
+    const existing=sv.data;
     if(existing&&existing.length===5){
       questions=existing.map(r=>({src:r.images.storage_url,answer:r.images.generation,label:GEN_LABEL[r.images.generation]||r.images.generation}));
     } else {
@@ -968,14 +1011,23 @@ function loadQ(i){
   document.getElementById('feedbackBar').classList.remove('show');
   const img=document.getElementById('quizImg'),skel=document.getElementById('skeleton');
   skel.classList.remove('hidden');img.style.opacity='0';
-  img.onload=()=>{skel.classList.add('hidden');img.style.opacity='1';};
-  img.onerror=()=>{skel.classList.add('hidden');img.style.opacity='0.3';};
+  // B31: gate startTimer() on image load (or error, or 4s safety) so the timer
+  // doesn't drain while the image is still fetching on Q1 cold-load.
+  let timerStarted=false,safetyId=null;
+  const beginTimer=()=>{
+    if(timerStarted)return;
+    timerStarted=true;
+    if(safetyId){clearTimeout(safetyId);safetyId=null;}
+    startTimer();
+  };
+  img.onload=()=>{skel.classList.add('hidden');img.style.opacity='1';beginTimer();};
+  img.onerror=()=>{skel.classList.add('hidden');img.style.opacity='0.3';beginTimer();};
+  safetyId=setTimeout(beginTimer,4000);
   img.src=q.src;
   document.getElementById('qCounter').textContent=`Q${i+1} / 5`;
   document.getElementById('scorePill').textContent=`${score} / 5`;
   document.getElementById('progFill').style.width=(i/5*100)+'%';
   document.getElementById('nextBtn').textContent=(i===4)?'SEE RESULTS →':'NEXT →';
-  startTimer();
 }
 
 function startTimer(){stopTimer();timerLeft=TIMER_SECONDS;updateTimerUI();timerInterval=setInterval(()=>{timerLeft--;updateTimerUI();if(timerLeft<=0){stopTimer();timeUp();}},1000);}
@@ -1097,12 +1149,13 @@ async function renderBoard(filter){
     }
     if(error)throw error;
     if(!data||data.length===0){list.innerHTML='<div class="lb-empty">No scores yet — be the first! 🏁</div>';return;}
+    // B5: escape user-controlled guest_name and rank_title before innerHTML interpolation.
     list.innerHTML=data.map((e,i)=>`
       <div class="lb-row">
         <div class="lb-rank ${i===0?'g1':i===1?'g2':i===2?'g3':''}">${i+1}</div>
         <div class="lb-info">
-          <div class="lb-name">${e.guest_name}</div>
-          <div class="lb-rank-title">${getRank(e.xp_earned||0).icon} ${e.rank_title||'Vette Curious'}</div>
+          <div class="lb-name">${escapeHtml(e.guest_name)}</div>
+          <div class="lb-rank-title">${getRank(e.xp_earned||0).icon} ${escapeHtml(e.rank_title||'Vette Curious')}</div>
         </div>
         <div class="lb-xp">${e.xp_earned?'+'+e.xp_earned:'—'} <span style="font-size:10px;color:var(--muted)">XP</span></div>
       </div>`).join('');
